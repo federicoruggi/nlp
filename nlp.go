@@ -130,7 +130,7 @@ func (m *model) learn() error {
 	}
 	for sid, s := range m.samples {
 		badWords := strings.Split(s, " ")
-		punct := []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'"}
+		punct := []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'", "?", "=", "^", "|", `"`, "`"}
 		words := []string{}
 		for _, bw := range badWords {
 			lw := len(words)
@@ -198,7 +198,7 @@ func (m *model) selectBestSample(expr string) (int, map[string][]int) {
 	wordsMap := make(map[int]map[string][]int)
 	// expr splitted by Space
 	badWords := strings.Split(expr, " ")
-	punct := []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'"}
+	punct := []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'", "?", "=", "^", "|", `"`, "`"}
 	words := []string{}
 	for _, bw := range badWords {
 		lw := len(words)
