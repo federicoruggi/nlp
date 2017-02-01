@@ -1,17 +1,68 @@
-// Package nlp provides general purpose Natural Language Processing.
+// Package nlp provides general purpose Natural Language Processing in any-lang.
 package nlp
 
 import (
+	"bytes"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 
-	"bytes"
-
 	"github.com/cdipaolo/goml/base"
 	"github.com/cdipaolo/goml/text"
 )
+
+// allowed punctuation symbols that can be by the right side of a keyword. eg:
+// {Keyword},
+var punctuation = []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'", "?", "=", "^", "|", `"`, "`"}
+
+// GUIDE FOR CONTRIBUTORS
+//
+// Simple resume of how it internally works:
+// New()
+// - Simply creates a *NL with the output beign an empty buffer
+//
+// RegisterModel()
+// - Checks that i is a struct
+// - The model name is the same as the i type
+// - Scan all fields:
+//   - It'll add a field to model.fields only if the field type is either int or string
+//     and if the field is exported
+// - Adds the model to the slice of model inside the NL type
+// (more info about model type check type definition)
+//
+// Learn()
+// - Calls the learn() func for every model inside the NL.models slice
+// - Trains the NaiveBayes algorithm that will be used to choose which model to use
+//   when calling NL.P() (the training is based on all model samples)
+//
+// model.learn()
+// - iterates through all samples searching for keywords
+// - keywords must be inside {} eg. {Keyword}
+//   (a keyword must have the same name as a struct field for that specific model)
+// - a key type is created and added to the model.keys slice
+// (more info about key type check type definition)
+//
+// Things to do:
+// Tests:
+// - unit tests
+//
+// Limits:
+// - make limits not CaseSensitive
+// - model.learn() should just search for limits
+//
+// Feedback:
+// - implement a NL.Feedback() func
+//   - this would take some chan of nlp.Feed or something
+//   - a Feed type would have to be created
+//     - would contain the model name, an expr and the name of the struct field that expr belongs to
+//
+// Keywords recognition:
+// - implement some kind of stemmer for both model.learn() and model.fit()
+// - the model type should have it's own *text.NaiveBayes
+//   - this field should be called naive
+//   - it would be trained with the stemmed words
+//   - it would be used to recognize wheter a word belongs to a type of keyword or not
 
 // NL is a Natural Language Processor
 type NL struct {
@@ -26,7 +77,7 @@ type NL struct {
 func New() *NL { return &NL{Output: bytes.NewBufferString("")} }
 
 // P proccesses the expr and returns one of
-// the types passed as the i parameter to the RegistryModel
+// the types passed as the i parameter to the RegisterModel
 // func filled with the data inside expr
 func (nl *NL) P(expr string) interface{} { return nl.models[nl.naive.Predict(expr)].fit(expr) }
 
@@ -34,23 +85,26 @@ func (nl *NL) P(expr string) interface{} { return nl.models[nl.naive.Predict(exp
 // returns an error if something occurred while learning
 func (nl *NL) Learn() error {
 	if len(nl.models) > 0 {
-		stream := make(chan base.TextDatapoint, 100)
+		// Create a new NaiveBayes algorithm
+		stream := make(chan base.TextDatapoint)
 		errors := make(chan error)
-		for i := range nl.models {
-			err := nl.models[i].learn()
-			if err != nil {
-				return err
-			}
-			for _, s := range nl.models[i].samples {
-				stream <- base.TextDatapoint{
-					X: s,
-					Y: uint8(i),
-				}
-			}
-		}
 		nl.naive = text.NewNaiveBayes(stream, uint8(len(nl.models)), base.OnlyWordsAndNumbers)
 		nl.naive.Output = nl.Output
 		go nl.naive.OnlineLearn(errors)
+		for modelIndice := range nl.models {
+			// make a model learn
+			err := nl.models[modelIndice].learn()
+			if err != nil {
+				return err
+			}
+			for _, s := range nl.models[modelIndice].samples {
+				// the class value (Y) is the indice of the model inside the slice
+				stream <- base.TextDatapoint{
+					X: s,
+					Y: uint8(modelIndice),
+				}
+			}
+		}
 		close(stream)
 		for {
 			err := <-errors
@@ -66,21 +120,31 @@ func (nl *NL) Learn() error {
 }
 
 type model struct {
+	name    string
 	tpy     reflect.Type
 	fields  []field
-	keys    map[int][]key
+	keys    [][]key
 	samples []string
 }
 
+// field contains info about a struct field
+// such as it's index in the struct type,
+// the name of the field and the kind (int, string)
 type field struct {
-	i int          // index
-	n string       // name
-	k reflect.Kind // kind
+	index int
+	name  string
+	kind  reflect.Kind
 }
 
+// key represents a keyword inside a sample,
+// it contains the side words of the keyword (limits)
+// (left, right) and the word itself (name of the struct field)
+// plus the ID (indice in the slice) (model.samples, model.fields)
+// of the sample and field
 type key struct {
 	left, word, right string
-	sample, field     int
+	sampleID, fieldID int
+	prob              float32
 }
 
 // RegisterModel registers a model i and creates possible patterns
@@ -92,15 +156,16 @@ func (nl *NL) RegisterModel(i interface{}, samples []string) error {
 	if i == nil {
 		return fmt.Errorf("can't create model from nil value")
 	}
-	if len(samples) == 0 || samples == nil {
+	if len(samples) == 0 {
 		return fmt.Errorf("samples can't be nil or empty")
 	}
 	tpy, val := reflect.TypeOf(i), reflect.ValueOf(i)
 	if tpy.Kind() == reflect.Struct {
 		mod := &model{
+			name:    tpy.Name(),
 			tpy:     tpy,
 			samples: samples,
-			keys:    make(map[int][]key),
+			keys:    make([][]key, len(samples)),
 		}
 	NextField:
 		for i := 0; i < tpy.NumField(); i++ {
@@ -120,6 +185,9 @@ func (nl *NL) RegisterModel(i interface{}, samples []string) error {
 
 func (m *model) learn() error {
 	isKeyword := func(word string) bool {
+		if len(word) == 1 || len(word) == 0 {
+			return false
+		}
 		if string(word[0]) == "{" && string(word[len(word)-1]) == "}" {
 			return true
 		}
@@ -130,58 +198,86 @@ func (m *model) learn() error {
 	}
 	for sid, s := range m.samples {
 		badWords := strings.Split(s, " ")
-		punct := []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'", "?", "=", "^", "|", `"`, "`"}
 		words := []string{}
 		for _, bw := range badWords {
-			lw := len(words)
-			for _, p := range punct {
+			added := false
+			for _, p := range punctuation {
 				if strings.HasSuffix(bw, p) {
 					words = append(words, string(bw[:len(bw)-1]))
 					words = append(words, string(bw[len(bw)-1]))
+					added = true
 				}
 			}
-			if lw == len(words) {
+			if !added {
 				words = append(words, bw)
 			}
 		}
-		wl := len(words)
-		for i, word := range words {
+		wsLen := len(words)
+		for wordID, word := range words {
 			if isKeyword(word) {
+				var left, kword, right, replace string
+				var fieldID int
+				replace = "-"
 				keyword := word[1 : len(word)-1]
-				k := key{}
 				kl := len(m.keys[sid])
 				for fid, f := range m.fields {
-					if f.n == keyword {
-						if i == 0 { // {} <- first
-							if i == wl-1 { // {}
-								k = key{left: "", word: keyword, right: "", sample: sid, field: fid}
+					if f.name == keyword {
+						fieldID = fid
+						if wordID == 0 { // {} <- first (the keyword being the first word in the sample)
+							if wordID == wsLen-1 { // {} (and being the only word in the sample)
+								kword = keyword
 							} else { // {} ...
-								if isKeyword(words[i+1]) { // {X} {Y} <- referring to X
-									k = key{left: "", word: keyword, right: "-", sample: sid, field: fid}
-								} else { // {} ...
-									k = key{left: "", word: keyword, right: words[i+1], sample: sid, field: fid}
+								if isKeyword(words[wordID+1]) { // {X} {Y} <- X (and having a keyword to the right)
+									kword = keyword
+									right = replace
+								} else { // {} ... (and having a limit to the right)
+									kword = keyword
+									right = words[wordID+1]
 								}
 							}
 						} else {
-							if i == wl-1 { // ... {}
-								if isKeyword(words[i-1]) { // {X} {Y} <- referring to Y
-									k = key{left: "-", word: keyword, right: "", sample: sid, field: fid}
-								} else { // ... {}
-									k = key{left: words[i-1], word: keyword, right: "", sample: sid, field: fid}
+							if wordID == wsLen-1 { // ... {} <- last (the keyword being the last word in the sample)
+								if isKeyword(words[wordID-1]) { // {X} {Y} <- Y (and having a keyword to the left)
+									left = replace
+									kword = keyword
+								} else { // ... {} (and having a limit to the left)
+									left = words[wordID-1]
+									kword = keyword
 								}
-							} else { // ... {} ...
-								if isKeyword(words[i-1]) { // ... {X} {Y} ... <- referring to Y
-									k = key{left: "-", word: keyword, right: words[i+1], sample: sid, field: fid}
-								} else if isKeyword(words[i+1]) { // ... {X} {Y} ... <- referring to X
-									k = key{left: words[i-1], word: keyword, right: "-", sample: sid, field: fid}
-								} else { // ... {} ...
-									k = key{left: words[i-1], word: keyword, right: words[i+1], sample: sid, field: fid}
+							} else { // ... {} ... (the keyword being somewhere in the sample)
+								if isKeyword(words[wordID-1]) { // ... {X} {Y} ... <- Y (and having a keyword to the left)
+									if isKeyword(words[wordID+1]) { // ... {X} {Y} {Z} ... <- Y (and having keywords on both sides)
+										left = replace
+										kword = keyword
+										right = replace
+									} else { // ... {X} {Y} ... <- Y (and having a keyword on the left)
+										left = replace
+										kword = keyword
+										right = words[wordID+1]
+									}
+								} else if isKeyword(words[wordID+1]) { // ... {X} {Y} ... <- X (and having a keyword to the right)
+									left = words[wordID-1]
+									kword = keyword
+									right = replace
+								} else { // ... {} ... (and having limits on both sides)
+									left = words[wordID-1]
+									kword = keyword
+									right = words[wordID+1]
 								}
 							}
 						}
 					}
 				}
-				m.keys[sid] = append(m.keys[sid], k)
+				k := key{
+					left:     left,
+					right:    right,
+					word:     kword,
+					sampleID: sid,
+					fieldID:  fieldID,
+				}
+				if k.word != "" {
+					m.keys[sid] = append(m.keys[sid], k)
+				}
 				if len(m.keys[sid]) == kl {
 					return fmt.Errorf("error while processing model samples, miss-spelled '%s'", keyword)
 				}
@@ -195,20 +291,22 @@ func (m *model) selectBestSample(expr string) (int, map[string][]int) {
 	// map[sample_id]score
 	scores := make(map[int]int)
 	// map[sample_id]map[keyword]indices
+	// indices is a []int of len = 2 that contains
+	// the indices where a keyword starts and ends on the expr
 	wordsMap := make(map[int]map[string][]int)
 	// expr splitted by Space
 	badWords := strings.Split(expr, " ")
-	punct := []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'", "?", "=", "^", "|", `"`, "`"}
 	words := []string{}
 	for _, bw := range badWords {
-		lw := len(words)
-		for _, p := range punct {
+		added := false
+		for _, p := range punctuation {
 			if strings.HasSuffix(bw, p) {
 				words = append(words, string(bw[:len(bw)-1]))
 				words = append(words, string(bw[len(bw)-1]))
+				added = true
 			}
 		}
-		if lw == len(words) {
+		if !added {
 			words = append(words, bw)
 		}
 	}
@@ -228,7 +326,6 @@ func (m *model) selectBestSample(expr string) (int, map[string][]int) {
 							if wordsMap[sampleID] == nil {
 								wordsMap[sampleID] = make(map[string][]int)
 							}
-							fmt.Printf("enter hiar\n\n")
 							wordsMap[sampleID][key.word] = append(wordsMap[sampleID][key.word], wi, wi+len(word))
 						}
 					}
@@ -257,7 +354,7 @@ func (m *model) selectBestSample(expr string) (int, map[string][]int) {
 									wordsMap[sampleID][key.word] = append(wordsMap[sampleID][key.word], strings.Index(expr, words[j]))
 								}
 							}
-							if reflect.New(m.tpy).Elem().Field(key.field).Kind() == reflect.String {
+							if reflect.New(m.tpy).Elem().Field(key.fieldID).Kind() == reflect.String {
 								if lw == len(wordsMap[sampleID][key.word]) {
 									wordsMap[sampleID][key.word] = append(wordsMap[sampleID][key.word], len(expr))
 								}
@@ -287,17 +384,17 @@ func (m *model) selectBestSample(expr string) (int, map[string][]int) {
 
 func (m *model) fit(expr string) interface{} {
 	val := reflect.New(m.tpy).Elem()
-	sampleID, keywords := m.selectBestSample(expr)
+	sampleID, keywords := m.selectBestSample(strings.ToLower(expr))
 	if sampleID != -1 {
 		for _, key := range m.keys[sampleID] {
 			if indices, ok := keywords[key.word]; ok {
-				switch val.Field(key.field).Kind() {
+				switch val.Field(key.fieldID).Kind() {
 				case reflect.String:
-					val.Field(key.field).SetString(string(expr[indices[0]:indices[1]]))
+					val.Field(key.fieldID).SetString(string(expr[indices[0]:indices[1]]))
 				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 					s := string(expr[indices[0]:indices[1]])
 					v, _ := strconv.ParseInt(s, 10, 0)
-					val.Field(key.field).SetInt(v)
+					val.Field(key.fieldID).SetInt(v)
 				}
 			}
 		}
@@ -337,8 +434,11 @@ func (cls *Classifier) NewClass(name string, samples []string) error {
 // Learn is the ml process for classification
 func (cls *Classifier) Learn() error {
 	if len(cls.classes) > 0 {
-		stream := make(chan base.TextDatapoint, 100)
+		stream := make(chan base.TextDatapoint)
 		errors := make(chan error)
+		cls.naive = text.NewNaiveBayes(stream, uint8(len(cls.classes)), base.OnlyWordsAndNumbers)
+		cls.naive.Output = cls.Output
+		go cls.naive.OnlineLearn(errors)
 		for i := range cls.classes {
 			for _, s := range cls.classes[i].samples {
 				stream <- base.TextDatapoint{
@@ -347,9 +447,6 @@ func (cls *Classifier) Learn() error {
 				}
 			}
 		}
-		cls.naive = text.NewNaiveBayes(stream, uint8(len(cls.classes)), base.OnlyWordsAndNumbers)
-		cls.naive.Output = cls.Output
-		go cls.naive.OnlineLearn(errors)
 		close(stream)
 		for {
 			err := <-errors
