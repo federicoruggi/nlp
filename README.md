@@ -1,4 +1,5 @@
-[![GoDoc](https://godoc.org/github.com/Shixzie/nlp?status.svg)](https://godoc.org/github.com/Shixzie/nlp) [![Go Report Card](https://goreportcard.com/badge/github.com/Shixzie/nlp)](https://goreportcard.com/report/github.com/Shixzie/nlp) [![Build Status](https://travis-ci.org/Shixzie/nlp.svg?branch=dev)](https://travis-ci.org/Shixzie/nlp)
+[![GoDoc](https://godoc.org/github.com/Shixzie/nlp?status.svg)](https://godoc.org/github.com/Shixzie/nlp) [![Go Report Card](https://goreportcard.com/badge/github.com/Shixzie/nlp)](https://goreportcard.com/report/github.com/Shixzie/nlp) [![Build Status](https://travis-ci.org/Shixzie/nlp.svg?branch=dev)](https://travis-ci.org/Shixzie/nlp) [![codecov](https://codecov.io/gh/Shixzie/nlp/branch/dev/graph/badge.svg)](https://codecov.io/gh/Shixzie/nlp)
+
 
 # nlp
 
@@ -72,7 +73,7 @@ play {Name} by  {Artist}
 
 Any character can be a *limit*, a `,` for example can be used as a limit.
 
-*keywords* as well as *limits* are `CaseSensitive` so be sure to type them right.
+*keywords* are `CaseSensitive` so be sure to type them right.
 
 **Note that putting 2 *keywords* together will cause that only 1 or none of them will be detected**
 

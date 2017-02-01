@@ -48,7 +48,6 @@ var punctuation = []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'
 // - unit tests
 //
 // Limits:
-// - make limits not CaseSensitive
 // - model.learn() should just search for limits
 //
 // Feedback:
@@ -62,7 +61,7 @@ var punctuation = []string{",", ".", "!", "¡", "-", "_", ";", ":", "]", "[", "'
 // - the model type should have it's own *text.NaiveBayes
 //   - this field should be called naive
 //   - it would be trained with the stemmed words
-//   - it would be used to recognize wheter a word belongs to a type of keyword or not
+//   - it would be used to recognize wheter a word belongs to a specific of keyword or not
 
 // NL is a Natural Language Processor
 type NL struct {
